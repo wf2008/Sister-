@@ -1,0 +1,6 @@
+{
+  "name": "Texter App",
+  "description": "A chat interface connecting a WebView to Gemini API to run JS auto-healing tests.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
