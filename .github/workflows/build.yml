@@ -50,11 +50,13 @@ jobs:
             exit 1
           fi
 
-      - name: Grant Execute Permission to gradlew
-        run: chmod +x gradlew
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
 
       - name: Execute Robolectric Tests
-        run: ./gradlew :app:testDebugUnitTest --continue --stacktrace
+        run: gradle :app:testDebugUnitTest --continue --stacktrace
 
       - name: Build Debug & Release APKs
         env:
@@ -63,8 +65,8 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'androiddebugkey' }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'android' }}
         run: |
-          ./gradlew assembleDebug --stacktrace
-          ./gradlew assembleRelease --stacktrace
+          gradle assembleDebug --stacktrace
+          gradle assembleRelease --stacktrace
 
       - name: Archive Debug APK
         if: always()
