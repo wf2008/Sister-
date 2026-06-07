@@ -177,7 +177,7 @@ class MainActivity : ComponentActivity() {
 
         ModalNavigationDrawer(
             drawerState = drawerState,
-            gesturesEnabled = drawerState.isOpen,
+            gesturesEnabled = false,
             drawerContent = {
                 ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
                     Spacer(modifier = Modifier.height(16.dp))
@@ -422,17 +422,21 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         val context = LocalContext.current
         
-        val dbMessages by remember(currentSessionId) {
-            currentSessionId?.let { chatDao.getMessagesForSession(it) }
-                ?: kotlinx.coroutines.flow.flowOf(emptyList())
-        }.collectAsState(initial = emptyList())
-        
         var messages by remember { mutableStateOf(listOf<ChatMessage>()) }
-        
-        LaunchedEffect(dbMessages) {
-            messages = dbMessages.map { 
-                val fileNames = if (it.attachedFileNames.isNotBlank()) it.attachedFileNames.split(",") else emptyList()
-                ChatMessage(it.role, it.content, it.isCode, fileNames)
+        var isInternalSessionChange by remember { mutableStateOf(false) }
+
+        LaunchedEffect(currentSessionId) {
+            if (isInternalSessionChange) {
+                isInternalSessionChange = false
+                return@LaunchedEffect
+            }
+            if (currentSessionId != null) {
+                messages = chatDao.getMessagesForSessionSync(currentSessionId).map { 
+                    val fileNames = if (it.attachedFileNames.isNotBlank()) it.attachedFileNames.split(",") else emptyList()
+                    ChatMessage(it.role, it.content, it.isCode, fileNames)
+                }
+            } else {
+                messages = emptyList()
             }
         }
         
@@ -443,6 +447,7 @@ class MainActivity : ComponentActivity() {
                     val firstWords = msg.content.take(30).replace("\n", " ") + "..."
                     val session = ChatSession(title = firstWords.ifBlank { "New Chat" })
                     sId = chatDao.insertSession(session)
+                    isInternalSessionChange = true
                     onSessionChanged(sId)
                 } else {
                     chatDao.updateSessionTime(sId)
