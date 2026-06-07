@@ -177,6 +177,7 @@ class MainActivity : ComponentActivity() {
 
         ModalNavigationDrawer(
             drawerState = drawerState,
+            gesturesEnabled = drawerState.isOpen,
             drawerContent = {
                 ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
                     Spacer(modifier = Modifier.height(16.dp))
@@ -557,7 +558,7 @@ class MainActivity : ComponentActivity() {
                                     this[tempMsgIndex] = ChatMessage("Gemini (fixed)", streamedCode, true)
                                 }
                             }
-                            if (correctedCode != null) {
+                            if (correctedCode != null && !correctedCode.startsWith("Error HTTP")) {
                                 messages = messages.toMutableList().apply {
                                     this[tempMsgIndex] = ChatMessage("Gemini (fixed)", correctedCode, true)
                                 }
@@ -565,7 +566,7 @@ class MainActivity : ComponentActivity() {
                                 webView.evaluateJavascript(correctedCode, null)
                             } else {
                                 messages = messages.toMutableList().apply {
-                                    this[tempMsgIndex] = ChatMessage("System", "Failed to get corrected code. Aborting.")
+                                    this[tempMsgIndex] = ChatMessage("System", correctedCode ?: "Failed to get corrected code. Aborting.")
                                 }
                                 saveMessage(messages[tempMsgIndex])
                                 isLoading = false
@@ -725,7 +726,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                     isLoading = false
-                                    if (code != null) {
+                                    if (code != null && !code.startsWith("Error HTTP")) {
                                         messages = messages.toMutableList().apply {
                                             this[tempMsgIndex] = ChatMessage("Gemini (code)", code, true)
                                         }
@@ -735,7 +736,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                     } else {
                                         messages = messages.toMutableList().apply {
-                                            this[tempMsgIndex] = ChatMessage("System", "Failed to get code from Gemini.", false)
+                                            this[tempMsgIndex] = ChatMessage("System", code ?: "Failed to get code from Gemini.", false)
                                         }
                                         saveMessage(messages[tempMsgIndex])
                                         pendingPrompt = null
@@ -809,10 +810,15 @@ class MainActivity : ComponentActivity() {
             val request = Request.Builder().url(url).post(body).build()
             val response = client.newCall(request).execute()
             if (onStream != null) {
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: ""
+                    android.util.Log.e("GeminiError", "HTTP ${response.code}: $errorBody")
+                    return@withContext "Error HTTP ${response.code}: $errorBody"
+                }
                 val source = response.body?.source() ?: return@withContext null
                 var fullText = ""
-                while (!source.exhausted()) {
-                    val line = source.readUtf8LineStrict()
+                while (true) {
+                    val line = source.readUtf8Line() ?: break
                     if (line.startsWith("data: ")) {
                         val data = line.substring(6)
                         if (data != "[DONE]") {
