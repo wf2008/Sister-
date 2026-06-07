@@ -19,6 +19,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Language
@@ -251,7 +252,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         ) { paddingValues ->
-            Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
+            Box(modifier = Modifier.padding(paddingValues).consumeWindowInsets(paddingValues).imePadding().fillMaxSize()) {
                 Box(modifier = Modifier
                     .fillMaxSize()
                     .alpha(if (currentTab == AppTab.Browser && !showSettings) 1f else 0f)
@@ -260,7 +261,13 @@ class MainActivity : ComponentActivity() {
                     BrowserScreen(webView = webView, currentUrl = currentUrl, onNavigate = { url ->
                         var loadUrl = url
                         if (!loadUrl.startsWith("http://") && !loadUrl.startsWith("https://")) {
-                            loadUrl = "https://$loadUrl"
+                            if (!loadUrl.contains(".")) {
+                                loadUrl = "https://www.google.com/search?q=$loadUrl"
+                            } else {
+                                loadUrl = "https://$loadUrl"
+                            }
+                        } else if (!loadUrl.contains(".") && !loadUrl.contains("localhost")) {
+                            loadUrl = "https://www.google.com/search?q=${url.replace("https://", "").replace("http://", "")}"
                         }
                         webView.loadUrl(loadUrl)
                     })
@@ -460,6 +467,22 @@ class MainActivity : ComponentActivity() {
         val maxRetries = 6
 
         var attachedFiles by remember { mutableStateOf(listOf<Triple<String, String, String>>()) } // Name, MimeType, Data
+        
+        var selectedModel by remember { mutableStateOf("gemini-2.0-flash") }
+        var isModelDropdownExpanded by remember { mutableStateOf(false) }
+        var availableModels by remember { mutableStateOf(listOf("gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro")) }
+
+        LaunchedEffect(activeApiKey) {
+            if (activeApiKey.isNotBlank()) {
+                val fetchedModels = (context as MainActivity).fetchAvailableModels(activeApiKey)
+                if (fetchedModels.isNotEmpty()) {
+                    availableModels = fetchedModels
+                    if (selectedModel !in availableModels) {
+                        selectedModel = availableModels.first()
+                    }
+                }
+            }
+        }
 
         val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
             scope.launch(Dispatchers.IO) {
@@ -524,16 +547,27 @@ class MainActivity : ComponentActivity() {
                         messages = messages + retryMsg
                         saveMessage(retryMsg)
                         scope.launch {
-                            val correctedCode = (context as MainActivity).askGeminiForFix(messages, pendingPrompt!!, errorJson, activeApiKey)
+                            val tempMsgIndex = messages.size
+                            messages = messages + ChatMessage("Gemini (fixed)", "", true)
+                            var streamedCode = ""
+
+                            val correctedCode = (context as MainActivity).askGeminiForFix(messages.dropLast(1), pendingPrompt!!, errorJson, activeApiKey, selectedModel) { token ->
+                                streamedCode += token
+                                messages = messages.toMutableList().apply {
+                                    this[tempMsgIndex] = ChatMessage("Gemini (fixed)", streamedCode, true)
+                                }
+                            }
                             if (correctedCode != null) {
-                                val codeMsg = ChatMessage("Gemini (fixed)", correctedCode, true)
-                                messages = messages + codeMsg
-                                saveMessage(codeMsg)
+                                messages = messages.toMutableList().apply {
+                                    this[tempMsgIndex] = ChatMessage("Gemini (fixed)", correctedCode, true)
+                                }
+                                saveMessage(messages[tempMsgIndex])
                                 webView.evaluateJavascript(correctedCode, null)
                             } else {
-                                val failMsg = ChatMessage("System", "Failed to get corrected code. Aborting.")
-                                messages = messages + failMsg
-                                saveMessage(failMsg)
+                                messages = messages.toMutableList().apply {
+                                    this[tempMsgIndex] = ChatMessage("System", "Failed to get corrected code. Aborting.")
+                                }
+                                saveMessage(messages[tempMsgIndex])
                                 isLoading = false
                                 pendingPrompt = null
                                 retryCount = 0
@@ -566,6 +600,13 @@ class MainActivity : ComponentActivity() {
                     .padding(8.dp),
                 reverseLayout = true
             ) {
+                if (isLoading) {
+                    item {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center) {
+                            CircularProgressIndicator(modifier = Modifier.padding(16.dp))
+                        }
+                    }
+                }
                 items(messages.reversed()) { message ->
                     Card(
                         modifier = Modifier.fillMaxWidth().padding(4.dp),
@@ -597,79 +638,132 @@ class MainActivity : ComponentActivity() {
                 }
             }
             
-            if (attachedFiles.isNotEmpty()) {
-                Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Attached: ${attachedFiles.size} files", style = MaterialTheme.typography.bodySmall)
-                    Spacer(modifier = Modifier.weight(1f))
-                    TextButton(onClick = { attachedFiles = emptyList() }) { Text("Clear") }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { filePicker.launch("*/*") }) {
-                    Icon(Icons.Default.AttachFile, contentDescription = "Attach File")
-                }
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = { inputText = it },
-                    modifier = Modifier.weight(1f),
-                    label = { Text("Describe what to fetch...") },
-                    enabled = !isLoading,
-                    maxLines = 4,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(onClick = {
-                    if ((inputText.isNotBlank() || attachedFiles.isNotEmpty()) && !isLoading) {
-                        if (activeApiKey.isBlank()) {
-                            messages = messages + ChatMessage("System", "Error: No API key set in Settings.")
-                            return@Button
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.foundation.layout.Box {
+                        TextButton(onClick = { isModelDropdownExpanded = true }) {
+                            Text(selectedModel.substringAfter("-"), style = MaterialTheme.typography.labelMedium)
                         }
-                        val userText = inputText
-                        val fileNames = attachedFiles.map { it.first }
-                        
-                        val userMsg = ChatMessage("User", userText, false, fileNames)
-                        messages = messages + userMsg
-                        saveMessage(userMsg)
-                        val prompt = userText
-                        pendingPrompt = prompt
-                        retryCount = 0
-                        inputText = ""
-                        val currentFiles = attachedFiles.toList()
-                        attachedFiles = emptyList()
-                        
-                        scope.launch {
-                            isLoading = true
-                            val code = (context as MainActivity).askGemini(messages.dropLast(1), prompt, activeApiKey, currentFiles)
-                            if (code != null) {
-                                val codeMsg = ChatMessage("Gemini (code)", code, true)
-                                messages = messages + codeMsg
-                                saveMessage(codeMsg)
-                                webView.post {
-                                    webView.evaluateJavascript(code, null)
-                                }
-                            } else {
-                                val failMsg = ChatMessage("System", "Failed to get code from Gemini.", false)
-                                messages = messages + failMsg
-                                saveMessage(failMsg)
-                                isLoading = false
-                                pendingPrompt = null
+                        DropdownMenu(
+                            expanded = isModelDropdownExpanded,
+                            onDismissRequest = { isModelDropdownExpanded = false }
+                        ) {
+                            availableModels.forEach { model ->
+                                DropdownMenuItem(
+                                    text = { Text(model.substringAfter("-")) },
+                                    onClick = { selectedModel = model; isModelDropdownExpanded = false }
+                                )
                             }
                         }
                     }
-                }, enabled = !isLoading) {
-                    Text("Send")
+                    if (attachedFiles.isNotEmpty()) {
+                        Spacer(modifier = Modifier.weight(1f))
+                        Text("Attached: ${attachedFiles.size} files", style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = { attachedFiles = emptyList() }) { Text("Clear") }
+                    }
+                }
+                
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant, shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    IconButton(onClick = { filePicker.launch("*/*") }) {
+                        Icon(Icons.Default.AttachFile, contentDescription = "Attach File")
+                    }
+                    
+                    androidx.compose.foundation.text.BasicTextField(
+                        value = inputText,
+                        onValueChange = { inputText = it },
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(vertical = 12.dp)
+                            .align(Alignment.CenterVertically),
+                        enabled = !isLoading,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                        decorationBox = { innerTextField ->
+                            if (inputText.isEmpty()) {
+                                Text("Ask anything...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                            }
+                            innerTextField()
+                        }
+                    )
+                    
+                    IconButton(
+                        onClick = {
+                            if ((inputText.isNotBlank() || attachedFiles.isNotEmpty()) && !isLoading) {
+                                if (activeApiKey.isBlank()) {
+                                    messages = messages + ChatMessage("System", "Error: No API key set in Settings.")
+                                    return@IconButton
+                                }
+                                val userText = inputText
+                                val fileNames = attachedFiles.map { it.first }
+                                
+                                val userMsg = ChatMessage("User", userText, false, fileNames)
+                                messages = messages + userMsg
+                                saveMessage(userMsg)
+                                val prompt = userText
+                                pendingPrompt = prompt
+                                retryCount = 0
+                                inputText = ""
+                                val currentFiles = attachedFiles.toList()
+                                attachedFiles = emptyList()
+                                
+                                scope.launch {
+                                    isLoading = true
+                                    val tempMsgIndex = messages.size
+                                    messages = messages + ChatMessage("Gemini (code)", "", true)
+                                    var streamedCode = ""
+
+                                    val code = (context as MainActivity).askGemini(messages.dropLast(1), prompt, activeApiKey, selectedModel, currentFiles) { token ->
+                                        streamedCode += token
+                                        messages = messages.toMutableList().apply {
+                                            this[tempMsgIndex] = ChatMessage("Gemini (code)", streamedCode, true)
+                                        }
+                                    }
+                                    isLoading = false
+                                    if (code != null) {
+                                        messages = messages.toMutableList().apply {
+                                            this[tempMsgIndex] = ChatMessage("Gemini (code)", code, true)
+                                        }
+                                        saveMessage(messages[tempMsgIndex])
+                                        webView.post {
+                                            webView.evaluateJavascript(code, null)
+                                        }
+                                    } else {
+                                        messages = messages.toMutableList().apply {
+                                            this[tempMsgIndex] = ChatMessage("System", "Failed to get code from Gemini.", false)
+                                        }
+                                        saveMessage(messages[tempMsgIndex])
+                                        pendingPrompt = null
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isLoading,
+                        modifier = Modifier.background(MaterialTheme.colorScheme.primaryContainer, shape = androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Send",
+                            tint = if (isLoading) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f) else MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
                 }
             }
         }
     }
 
-    suspend fun askGemini(history: List<ChatMessage>, prompt: String, apiKey: String, files: List<Triple<String, String, String>> = emptyList()): String? = withContext(Dispatchers.IO) {
+    suspend fun askGemini(history: List<ChatMessage>, prompt: String, apiKey: String, modelId: String = "gemini-2.0-flash", files: List<Triple<String, String, String>> = emptyList(), onStream: ((String) -> Unit)? = null): String? = withContext(Dispatchers.IO) {
         try {
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey"
+            val url = if (onStream != null) {
+                "https://generativelanguage.googleapis.com/v1beta/models/$modelId:streamGenerateContent?alt=sse&key=$apiKey"
+            } else {
+                "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent?key=$apiKey"
+            }
             
             val contentsArray = mutableListOf<Map<String, Any>>()
             
@@ -714,28 +808,91 @@ class MainActivity : ComponentActivity() {
             val body = json.toRequestBody("application/json".toMediaType())
             val request = Request.Builder().url(url).post(body).build()
             val response = client.newCall(request).execute()
-            val responseBody = response.body?.string() ?: return@withContext null
-            
-            if (!response.isSuccessful) {
-                return@withContext null
+            if (onStream != null) {
+                val source = response.body?.source() ?: return@withContext null
+                var fullText = ""
+                while (!source.exhausted()) {
+                    val line = source.readUtf8LineStrict()
+                    if (line.startsWith("data: ")) {
+                        val data = line.substring(6)
+                        if (data != "[DONE]") {
+                            try {
+                                val jsonResponse = JSONObject(data)
+                                val text = jsonResponse
+                                    .getJSONArray("candidates")
+                                    .getJSONObject(0)
+                                    .getJSONObject("content")
+                                    .getJSONArray("parts")
+                                    .getJSONObject(0)
+                                    .getString("text")
+                                fullText += text
+                                withContext(Dispatchers.Main) { onStream(text) }
+                            } catch (e: Exception) {}
+                        }
+                    }
+                }
+                return@withContext fullText
+            } else {
+                val responseBody = response.body?.string() ?: return@withContext null
+                
+                if (!response.isSuccessful) {
+                    android.util.Log.e("GeminiError", "HTTP ${response.code}: $responseBody")
+                    return@withContext "Error HTTP ${response.code}: $responseBody"
+                }
+
+                val jsonResponse = JSONObject(responseBody)
+                val text = jsonResponse
+                    .getJSONArray("candidates")
+                    .getJSONObject(0)
+                    .getJSONObject("content")
+                    .getJSONArray("parts")
+                    .getJSONObject(0)
+                    .getString("text")
+                return@withContext text
             }
-            
-            val jsonResponse = JSONObject(responseBody)
-            val text = jsonResponse
-                .getJSONArray("candidates")
-                .getJSONObject(0)
-                .getJSONObject("content")
-                .getJSONArray("parts")
-                .getJSONObject(0)
-                .getString("text")
-            return@withContext extractJavaScript(text)
         } catch (e: Exception) {
             e.printStackTrace()
-            return@withContext null
+            return@withContext "Exception: ${e.message}"
         }
     }
 
-    suspend fun askGeminiForFix(history: List<ChatMessage>, originalPrompt: String, errorJson: String, apiKey: String): String? {
+    suspend fun fetchAvailableModels(apiKey: String): List<String> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext emptyList()
+        try {
+            val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey"
+            val request = Request.Builder().url(url).get().build()
+            val response = client.newCall(request).execute()
+            val responseBody = response.body?.string() ?: return@withContext emptyList()
+            if (!response.isSuccessful) return@withContext emptyList()
+            
+            val jsonResponse = JSONObject(responseBody)
+            val modelsArray = jsonResponse.getJSONArray("models")
+            val availableModels = mutableListOf<String>()
+            for (i in 0 until modelsArray.length()) {
+                val modelItem = modelsArray.getJSONObject(i)
+                val name = modelItem.getString("name").substringAfter("models/")
+                val supportedMethods = modelItem.optJSONArray("supportedGenerationMethods")
+                var supportsGenerateContent = false
+                if(supportedMethods != null) {
+                    for (j in 0 until supportedMethods.length()) {
+                        if (supportedMethods.getString(j) == "generateContent") {
+                            supportsGenerateContent = true
+                            break
+                        }
+                    }
+                }
+                if (supportsGenerateContent && name.startsWith("gemini")) {
+                    availableModels.add(name)
+                }
+            }
+            return@withContext availableModels
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return@withContext emptyList()
+        }
+    }
+
+    suspend fun askGeminiForFix(history: List<ChatMessage>, originalPrompt: String, errorJson: String, apiKey: String, modelId: String = "gemini-2.0-flash", onStream: ((String) -> Unit)? = null): String? {
         val fixPrompt = """
 The previous JavaScript code you generated failed with this error:
 $errorJson
@@ -744,7 +901,7 @@ Original request: $originalPrompt
 
 Please generate a corrected version of the JavaScript code that fixes the error. Output only the code block.
         """.trimIndent()
-        return askGemini(history, fixPrompt, apiKey)
+        return askGemini(history, fixPrompt, apiKey, modelId, emptyList(), onStream)
     }
 
     private fun extractJavaScript(response: String): String? {
